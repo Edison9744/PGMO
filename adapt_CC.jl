@@ -29,7 +29,7 @@ end
 
 function direction_cone(model,p,m)
 
-    tol = 1e-5
+    tol = 1e-8
 
     optimizer = JuMP.unsafe_backend(model)
     # Convert model as NLPModelsJuMP
@@ -72,6 +72,9 @@ function direction_cone(model,p,m)
     gradients_eq   = J_sparse[indices_egalites, :]
     grad_obj= NLPModels.grad(nlp,w)
 
+
+    # Début de l'optim sur d 
+    
     model_d = Model(Ipopt.optimizer)
 
     
@@ -82,10 +85,14 @@ function direction_cone(model,p,m)
     for j in 1: length(gradients_actifs_ineq)
         @constraint(model_d, gradients_actifs_ineq[j]*d >= 0 )
     end
+    
 
     for k in 1: length(gradients_eq)
         @constraint(model_d, gradients_eq[k]*d == 0 )
     end
+
+    # @constraint(model_d, gradients_actifs_ineq*d .>= 0 )
+    # @constraint(model_d, gradients_eq*d .== 0 )
 
     # Contrainte de complementarité
     
