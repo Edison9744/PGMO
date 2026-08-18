@@ -43,89 +43,84 @@ function build_madnlp(mpcc)
     return solver
 end
 
+function generate_sobol_candidates(dim::Int, n_samples::Int; ub_default::Float64 = 1000.0)
+    lb = zeros(dim)
+    ub = fill(ub_default, dim)
 
-function push_inside(x, lb, ub; rel_margin = 1e-6, abs_margin = 1e-8)
-    for i in eachindex(x)
-        width = ub[i] - lb[i]
+    # Tirage de la matrice Sobol (taille: dim x n_samples)
+    X = QuasiMonteCarlo.sample(n_samples, lb, ub, SobolSample())
 
-        if width <= 0.0
-            x[i] = lb[i]
-        else
-            δ = min(width / 3, max(abs_margin, rel_margin * width))
-            x[i] = clamp(x[i], lb[i] + δ, ub[i] - δ)
-        end
+    # Conversion en liste de Vecteur
+    return [Vector{Float64}(X[:, k]) for k in 1:size(X, 2)]
+end
+
+function obj(nlp, x)
+
+    list = Dict()
+    for i in x
+        f = NLPModels.obj(nlp, i)
+        println("obj ", f," et x ", length(i))
+        list[i] = f
     end
 
-    return x
+    #ordre décroissant
+    x_trie = sort(collect(keys(list)), by = k -> list[k], rev = true)
+    return x_trie
 end
 
 
+function max_compare(nlp, list)
+    x_trie = obj(nlp, list)
+    println("max_compare ", length(x_trie[1]) )  
+    return x_trie[1]
+end
 
-function score_candidat(nlp, x0, x_cc_candidat, ind_cc)
+
+function recherche_local(nlp, x, max_iter = 50, tol = 1e-6)
+    nlp.meta.x0 .= x
+    n = nlp.meta.nvar  # Nombre de variables d'origine (dimension de x0)
+
+    solver = MadNLPSolver(
+        nlp; 
+        max_iter = max_iter,   # Limite le nombre d'itérations
+        tol = tol,             # Tolérance d'arrêt
+        print_level = MadNLP.ERROR # Désactive la plupart des affichages (optionnel)
+    )
+    solve!(solver)
     
-    x_full = copy(x0)
-    x_full[ind_cc] .= x_cc_candidat
-
-
-    # eval fonction objectif
-    obj = try
-        f = NLPModels.obj(nlp, x_full)
-        isfinite(f) ? Float64(f) : Inf
-    catch
-        Inf
-    end
-
-    # Évaluation de la violation des contraintes (Faisabilité primale)
-    violation = try
-        c = NLPModels.cons(nlp, x_full)
-        lcon = nlp.meta.lcon
-        ucon = nlp.meta.ucon
-
-        viol_sum = 0.0
-        for i in eachindex(c)
-            v_low = max(0.0, lcon[i] - c[i])
-            v_upp = max(0.0, c[i] - ucon[i])
-            viol_sum += v_low^2 + v_upp^2
-        end
-
-        sqrt(viol_sum)
-    catch
-        Inf
-    end
-
-    return violation, obj
+    return copy(solver.x.values[1:n])    
 end
 
 
-function short_madnlp_polish(nlp::AbstractNLPModel, x0::Vector{Float64}, ind_cc;
-                            max_iter,  
-                            tol = 1e-6)
-    try
-        res = MadNLP.madnlp(
-            nlp;
-            x0 = x0,
-            max_iter = max_iter,
-            tol = tol,
-            print_level = MadNLP.OFF
-        )
+function cherche(nlp, candidat_garde)
 
-        # Si aucune solution n'est retournée ou si elle contient des valeurs invalides
-        if isnothing(res) || isnothing(res.solution) || any(!isfinite, res.solution)
-            return copy(x0)
+    list_max = Vector{Vector{Float64}}()
+    list_new_vect = Vector{Vector{Float64}}()
+
+    y_samp = candidat_garde[1]
+
+    push!(list_new_vect, candidat_garde[1])
+    push!(list_max, candidat_garde[1])
+
+    # evolution de lambda
+    kmax = length(candidat_garde)
+
+    for r in 1:kmax
+        x_sample = max_compare(nlp, list_max)
+
+        if r == 1
+        else 
+            # evolution de lambda
+            λ = 0.25 + 0.75 * (r - 1) / max(1, kmax - 1)
+            y_samp = (1 - λ) .* candidat_garde[r] .+ λ .* x_sample
         end
 
-        y = Vector{Float64}(res.solution)
-        
-        # S'assurer que la solution reste strictement dans les bornes
-        y[ind_cc] .= push_inside(y[ind_cc], lb, ub)
-        return y[ind_cc]
-
-    catch
-        # En cas de crash du solveur, on retourne x0 intact
-        return x0[ind_cc]
+        push!(list_new_vect, y_samp)
+        push!(list_max, recherche_local(nlp, y_samp))
     end
-end
 
+    return list_max
+end
 
 function tiktak(mpcc)
     
@@ -133,95 +128,26 @@ function tiktak(mpcc)
     nlp = solver.cb.nlp
     # Get initial primal position
     x0 = NLPModels.get_x0(nlp)
-    x1 = copy(x0)
-    
-    # x00 = copy(x0)
-    
 
     # Get indices
     ind_x1 = mpcc.meta.ind_cc1
     ind_x2 = mpcc.meta.ind_cc2
+    # tiktak
+
+    N = 200
+    N_garde = 50
+
+    candidat = generate_sobol_candidates(length(x0), N)
+    candidat_trie = obj(nlp, candidat) 
+
+    candidat_garde = candidat_trie[1:min(N_garde, end)] 
+
+    best_x = max_compare(nlp, cherche(nlp, candidat_garde))
 
     # TODO: modify initial point here!!!(tiktak)
 
-    candidat = Vector{Vector{Float64}}()
-
-    lvar = NLPModels.get_lvar(nlp)  
-    uvar = NLPModels.get_uvar(nlp)  
-
-    ind_cc = vcat(ind_x1, ind_x2)
-
-    
-
-    lb = lvar[ind_cc]
-    ub = uvar[ind_cc]
-
-    println("lb ", lb)
-    println("ub ", ub)
-
-
-
-    x0[ind_cc] .= push_inside(x0[ind_cc], lb, ub)
-    println("point de deparrt ", x0)
-
-
-    new_x0 = vcat(x0[ind_x1], x0[ind_x2])
-    new_x0 = push_inside(new_x0, lb, ub)
-    push!(candidat, new_x0)
-
-    # echantillonage 
-
-    # peut augmenter le nombre de tirage n_sample = 100 ici
-
-    Xraw = QuasiMonteCarlo.sample(100, lb, ub, SobolSample())
-    X = ndims(Xraw) == 1 ? reshape(collect(Xraw), length(lb), :) : Xraw
-    for k in 1:size(X, 2)
-        x = Vector{Float64}(X[:, k])
-        x = push_inside(x, lb, ub)
-        push!(candidat, x)
-    end
-
-    # Phase TIC 
-
-    scores = [
-    score_candidat(nlp, x0, x_cc, ind_cc) 
-    for x_cc in candidat
-    ]
-
-    #println("score", scores)
-    order = sortperm(eachindex(candidat), by = i -> scores[i])
-    best_x = copy(candidat[order[1]])
-    best_score = scores[order[1]]
-
-    # Phase TAC
-
-    # nombre des candidats à ameliorer 
-    kmax = 15
-
-    for r in 1:kmax
-        x_sample = candidat[order[r]]
-
-        # Mélange TikTac : combinaison entre le meilleur courant et un candidat.
-        if r == 1
-            y_samp = copy(x_sample)
-        else
-            λ = 0.25 + 0.75 * (r - 1) / max(1, kmax - 1)
-            y_samp = (1 - λ) .* best_x .+ λ .* x_sample
-        end
-
-        y_samp = push_inside(y_samp, lb, ub)
-        y = copy(x0)
-        y[ind_cc] .= y_samp # on remet les autres valeurs du x0, rapel: x00 est une copie original du x0 de base
-    
-        best_x = short_madnlp_polish(nlp, y, ind_cc, max_iter = 40, tol = 1e-6)
-
-    end
-
-    best_x0 = copy(x0)
-    best_x0[ind_cc] .= best_x 
-    # Recompute initial position
-    x1 = best_x0[ind_x1]
-    x2 = best_x0[ind_x2]
+    x1 = best_x[ind_x1]
+    x2 = best_x[ind_x2]
     x0[ind_x1] .= x1
     x0[ind_x2] .= x2
 
