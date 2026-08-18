@@ -9,7 +9,7 @@ using Random
 using QuasiMonteCarlo 
 
 
-
+include("examples/edf-example-2/1d.jl")
 include("examples/edf-example-1/quad_jump.jl")
 
 # Load model
@@ -43,7 +43,7 @@ function build_madnlp(mpcc)
     return solver
 end
 
-function generate_sobol_candidates(dim::Int, n_samples::Int; ub_default::Float64 = 1000.0)
+function generate_sobol_candidates(dim::Int, n_samples::Int; ub_default::Float64 = 10000.0)
     lb = zeros(dim)
     ub = fill(ub_default, dim)
 
@@ -59,7 +59,6 @@ function obj(nlp, x)
     list = Dict()
     for i in x
         f = NLPModels.obj(nlp, i)
-        println("obj ", f," et x ", length(i))
         list[i] = f
     end
 
@@ -71,12 +70,11 @@ end
 
 function max_compare(nlp, list)
     x_trie = obj(nlp, list)
-    println("max_compare ", length(x_trie[1]) )  
     return x_trie[1]
 end
 
 
-function recherche_local(nlp, x, max_iter = 50, tol = 1e-6)
+function recherche_local(nlp, x, max_iter = 100, tol = 1e-6)
     nlp.meta.x0 .= x
     n = nlp.meta.nvar  # Nombre de variables d'origine (dimension de x0)
 
@@ -88,7 +86,7 @@ function recherche_local(nlp, x, max_iter = 50, tol = 1e-6)
     )
     solve!(solver)
     
-    return copy(solver.x.values[1:n])    
+    return copy(solver.x.values[1:n]) 
 end
 
 
@@ -134,8 +132,8 @@ function tiktak(mpcc)
     ind_x2 = mpcc.meta.ind_cc2
     # tiktak
 
-    N = 200
-    N_garde = 50
+    N = 1000
+    N_garde = 100
 
     candidat = generate_sobol_candidates(length(x0), N)
     candidat_trie = obj(nlp, candidat) 
@@ -146,13 +144,17 @@ function tiktak(mpcc)
 
     # TODO: modify initial point here!!!(tiktak)
 
+    
     x1 = best_x[ind_x1]
     x2 = best_x[ind_x2]
     x0[ind_x1] .= x1
     x0[ind_x2] .= x2
 
-    # Mettre à jour dans le solveur / NLP
-    #solver.x .= x0_finalMP.set_start_value(v, val)
+
+    solver = MadNLPSolver(
+    nlp; 
+    print_level = MadNLP.ERROR 
+    )
 
     results = MadNLP.solve!(solver)
 
@@ -160,9 +162,26 @@ function tiktak(mpcc)
     x1_sol = results.solution[ind_x1]
     x2_sol = results.solution[ind_x2]
 
+    println(length(results.solution))
+
     return results
 end
 
 model = load_model()
 mpcc = convert_jump_to_mpcc(model)
-results = tiktak(mpcc)
+results = tiktak(mpcc) 
+
+a= fill(0.1,10)
+model_1 = edf_tarification_1d_model(alppha = a)
+mpcc = convert_jump_to_mpcc(model_1)
+results = tiktak(mpcc) 
+
+
+set_optimizer(model_1, () -> MathOptComplements.Optimizer(Gurobi.Optimizer()))
+set_attribute(model_1, "TimeLimit", 60.0)
+JuMP.set_silent(model_1)
+optimize!(model_1)
+
+termination_status(model_1)
+JuMP.objective_value(model_1)
+
